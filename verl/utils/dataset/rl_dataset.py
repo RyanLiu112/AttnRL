@@ -107,6 +107,7 @@ class RLHFDataset(Dataset):
         self.return_full_prompt = config.get("return_full_prompt", False)
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
+        self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count())
@@ -132,6 +133,7 @@ class RLHFDataset(Dataset):
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
+        self.all_data_num = len(self.dataframe)
 
         print(f"dataset len: {len(self.dataframe)}")
 
@@ -139,11 +141,26 @@ class RLHFDataset(Dataset):
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
-            self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
-                num_proc=self.num_workers,
-                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-            )
+            if self.apply_chat_template_kwargs.get("enable_thinking", False):
+                self.dataframe = self.dataframe.filter(
+                    lambda doc: len(
+                        tokenizer.apply_chat_template(
+                            doc[prompt_key], add_generation_prompt=True, **self.apply_chat_template_kwargs
+                        )
+                    ) + 2 <= self.max_prompt_length,
+                    num_proc=self.num_workers,
+                    desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+                )
+            else:
+                self.dataframe = self.dataframe.filter(
+                    lambda doc: len(
+                        tokenizer.apply_chat_template(
+                            doc[prompt_key], add_generation_prompt=True, **self.apply_chat_template_kwargs
+                        )
+                    ) <= self.max_prompt_length,
+                    num_proc=self.num_workers,
+                    desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+                )
 
             print(f"filter dataset len: {len(self.dataframe)}")
 
@@ -189,7 +206,9 @@ class RLHFDataset(Dataset):
         if self.processor is not None:
             from verl.utils.dataset.vision_utils import process_image, process_video
 
-            raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            raw_prompt = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+            )
             multi_modal_data = {}
 
             images = None
@@ -218,10 +237,17 @@ class RLHFDataset(Dataset):
             row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
-            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            raw_prompt = self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+            )
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
+
+        if self.apply_chat_template_kwargs.get("enable_thinking", False):
+            raw_prompt += "<think>\n"
+            input_ids = torch.cat([input_ids, torch.tensor([151667, 198], dtype=input_ids.dtype, device=input_ids.device).reshape(1, -1)], dim=1)
+            attention_mask = torch.cat([attention_mask, torch.ones(2, dtype=attention_mask.dtype, device=attention_mask.device).reshape(1, -1)], dim=1)
 
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,

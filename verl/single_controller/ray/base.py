@@ -15,6 +15,7 @@
 import inspect
 import logging
 import os
+os.environ.pop("ROCR_VISIBLE_DEVICES", None)  # 删除该变量
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple

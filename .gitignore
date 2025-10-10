@@ -116,7 +116,7 @@ ENV/
 *.lock
 
 # data
-*.parquet
+# *.parquet
 
 
 # local logs
@@ -124,3 +124,5 @@ logs
 log
 outputs
 .history
+/plot
+/infer

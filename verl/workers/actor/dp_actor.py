@@ -79,11 +79,12 @@ class DataParallelPPOActor(BasePPOActor):
         )
         self.device_name = get_device_name()
 
-    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False, output_attentions=False, attn_block_size=0, process_attn_type="") -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
+            attns
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -96,12 +97,16 @@ class DataParallelPPOActor(BasePPOActor):
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
+            if output_attentions and attn_block_size:
+                token_ranges = micro_batch["token_ranges"]
+                step_nums = micro_batch["step_nums"]
             entropy = None
+            attn = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
             if self.use_remove_padding:
-                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
+                input_ids_rmpad, indices, cu_seqlens, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
                 # unpad the position_ids to align the rotary
@@ -142,6 +147,20 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
+                if output_attentions:
+                    extra_args["output_attentions"] = True  # but we do not need attention for every
+                    extra_args["use_remove_padding"] = True
+                    if attn_block_size > 0:
+                        extra_args["attn_block_size"] = attn_block_size
+                        extra_args["token_ranges"] = token_ranges.cpu().tolist()
+                        extra_args["cu_seqlens"] = cu_seqlens.cpu().tolist()
+                        extra_args["step_nums"] = step_nums.cpu().tolist()
+                    if process_attn_type:
+                        extra_args["process_attn_type"] = process_attn_type
+                    if "stop_think_step_idxs" in micro_batch.keys():
+                        extra_args["stop_think_step_idxs"] = micro_batch["stop_think_step_idxs"]
+                    if "stop_think_token_idxs" in micro_batch.keys():
+                        extra_args["stop_think_token_idxs"] = micro_batch["stop_think_token_idxs"]
 
                 output = self.actor_module(
                     input_ids=input_ids_rmpad,
@@ -151,6 +170,9 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+
+                if output_attentions and attn_block_size > 0:
+                    attn = output.hidden_states
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -217,6 +239,19 @@ class DataParallelPPOActor(BasePPOActor):
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
+                if output_attentions:
+                    extra_args["output_attentions"] = True  # but we do not need attention for every
+                    extra_args["use_remove_padding"] = False
+                    if attn_block_size > 0:
+                        extra_args["attn_block_size"] = attn_block_size
+                        extra_args["token_ranges"] = token_ranges
+                    if process_attn_type:
+                        extra_args["process_attn_type"] = process_attn_type
+                    if "stop_think_step_idxs" in micro_batch.keys():
+                        extra_args["stop_think_step_idxs"] = micro_batch["stop_think_step_idxs"]
+                    if "stop_think_token_idxs" in micro_batch.keys():
+                        extra_args["stop_think_token_idxs"] = micro_batch["stop_think_token_idxs"]
+
                 output = self.actor_module(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -237,9 +272,9 @@ class DataParallelPPOActor(BasePPOActor):
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                     if calculate_entropy:
-                        entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                        entropy = self.compute_entropy_from_logits(logits)  # (bsz, response_length)
 
-            return entropy, log_probs
+            return entropy, log_probs, attn
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -284,8 +319,18 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        output_attentions = data.meta_info.pop("output_attentions", False)
+        attn_block_size = data.meta_info.pop("attn_block_size", 0)
+        # token_ranges = data.meta_info.pop("token_ranges", [])
+        process_attn_type = data.meta_info.pop("process_attn_type", "")
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        if output_attentions and attn_block_size:
+            select_keys.extend(["token_ranges", "step_nums"])
+            if "stop_think_step_idxs" in data.batch.keys():
+                select_keys.append("stop_think_step_idxs")
+            if "stop_think_token_idxs" in data.batch.keys():
+                select_keys.append("stop_think_token_idxs")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -302,17 +347,27 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
-        for micro_batch in micro_batches:
+        attns_lst = []
+        for i, micro_batch in enumerate(micro_batches):
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
+                if output_attentions and attn_block_size:
+                    if use_dynamic_bsz:
+                        entropy, log_probs, attns_dict = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy, output_attentions=output_attentions, attn_block_size=attn_block_size, process_attn_type=process_attn_type)
+                    else:
+                        raise NotImplementedError
+                else:
+                    entropy, log_probs, attns_dict = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            if output_attentions:
+                attns_lst.append(attns_dict)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
+        attns = None
         if calculate_entropy:
             entropys = torch.concat(entropy_lst, dim=0)
         if use_dynamic_bsz:
@@ -322,8 +377,18 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs = log_probs[revert_indices]
             if calculate_entropy:
                 entropys = entropys[revert_indices]
+            if output_attentions:
+                keys_to_gather = list(attns_lst[0].keys())
+                attns = {}
+                for key in keys_to_gather:
+                    lst = []
+                    for i in range(len(attns_lst)):
+                        for j in range(len(attns_lst[i][key])):
+                            lst.append(attns_lst[i][key][j])
+                    lst = torch.stack(lst)[revert_indices]
+                    attns[key] = lst
 
-        return log_probs, entropys
+        return log_probs, entropys, attns
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
@@ -397,7 +462,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
+                    entropy, log_prob, _ = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
 
                     pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
                         old_log_prob=old_log_prob,

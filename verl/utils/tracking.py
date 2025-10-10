@@ -51,12 +51,45 @@ class Tracking:
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
+            import os
 
-            settings = None
-            if config and config["trainer"].get("wandb_proxy", None):
-                settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
-            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
-            self.logger["wandb"] = wandb
+            # check and create config.default_local_dir
+            if not os.path.exists(config["trainer"]["default_local_dir"]):
+                os.makedirs(config["trainer"]["default_local_dir"])
+            # check if config.default_local_dir / wandb_id.txt exists
+            wandb_resume_flag = False
+            wandb_id_file = os.path.join(config["trainer"]["default_local_dir"], "wandb_id.txt")
+            if os.path.exists(wandb_id_file):
+                with open(wandb_id_file, "r") as f:
+                    wandb_id = f.read().strip()
+                if wandb_id:
+                    if config["trainer"].get("fork_step", False):
+                        try:
+                            step_id = config["trainer"]["fork_step"]
+                            wandb.init(project=project_name, fork_from=f"{wandb_id}?_step={step_id}")
+                            wandb_resume_flag = True
+                            print("Fork wandb successfully with id: ", wandb_id, "from step: ", step_id)
+                        except Exception as e:
+                            print("Failed to resume wandb: ", e)
+                            wandb_resume_flag = False
+                    else:
+                        try:
+                            wandb.init(project=project_name, id=wandb_id, resume="allow", mode="offline" if config["trainer"].get("wandb_offline", False) else "online")
+                            wandb_resume_flag = True
+                            print("Resume wandb successfully with id: ", wandb_id)
+                        except Exception as e:
+                            print("Failed to resume wandb: ", e)
+                            wandb_resume_flag = False
+                self.logger["wandb"] = wandb
+
+            if not wandb_resume_flag:
+                settings = None
+                if config and config["trainer"].get("wandb_proxy", None):
+                    settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
+                wandb.init(project=project_name, name=experiment_name, config=config, settings=settings, mode="offline" if config["trainer"].get("wandb_offline", False) else "online")
+                with open(wandb_id_file, "w") as f:
+                    f.write(wandb.run.id)
+                    self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:
             import os

@@ -15,6 +15,7 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+import os
 import hydra
 import ray
 
@@ -36,7 +37,7 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "RAY_DEBUG": "legacy"}},
             num_cpus=config.ray_init.num_cpus,
         )
 
@@ -64,6 +65,11 @@ class TaskRunner:
 
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
+
+        if config.trainer.get("val_only", False) and config.trainer.get("val_ckpt", False) and config.trainer.val_ckpt > 0:
+            checkpoint_folder = config.trainer.default_local_dir
+            model_path = os.path.join(checkpoint_folder, f"global_step_{config.trainer.val_ckpt}/hf_model")
+            config.actor_rollout_ref.model.path = model_path
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on

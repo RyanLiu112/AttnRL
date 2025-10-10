@@ -77,7 +77,7 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     )
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
+def compute_data_metrics(batch: DataProto, use_critic: bool = True, accs=None) -> Dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -102,6 +102,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
+    score = sequence_score
+    if accs is not None:
+        rewards = torch.where(accs > 0, 1, 0).to(sequence_reward.dtype)
+    else:
+        rewards = sequence_reward
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
@@ -128,13 +133,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
 
     metrics = {
         # score
-        "critic/score/mean": torch.mean(sequence_score).detach().item(),
-        "critic/score/max": torch.max(sequence_score).detach().item(),
-        "critic/score/min": torch.min(sequence_score).detach().item(),
+        "critic/score/mean": torch.mean(score).detach().item(),
+        "critic/score/max": torch.max(score).detach().item(),
+        "critic/score/min": torch.min(score).detach().item(),
         # reward
-        "critic/rewards/mean": torch.mean(sequence_reward).detach().item(),
-        "critic/rewards/max": torch.max(sequence_reward).detach().item(),
-        "critic/rewards/min": torch.min(sequence_reward).detach().item(),
+        "critic/rewards/mean": torch.mean(rewards).detach().item(),
+        "critic/rewards/max": torch.max(rewards).detach().item(),
+        "critic/rewards/min": torch.min(rewards).detach().item(),
         # adv
         "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
         "critic/advantages/max": torch.max(valid_adv).detach().item(),
@@ -166,6 +171,131 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+
+    if accs is not None:
+        pos_idxs = accs > 0
+    else:
+        pos_idxs = sequence_score > 0
+    pos_batch = batch[pos_idxs]
+    if pos_batch.batch['responses'].shape[0] != 0:
+        pos_sequence_score = pos_batch.batch["token_level_scores"].sum(-1)
+        pos_sequence_reward = pos_batch.batch["token_level_rewards"].sum(-1)
+        pos_score = pos_sequence_score
+        if accs is not None:
+            pos_rewards = torch.where(accs[pos_idxs] > 0, 1, 0).to(sequence_reward.dtype)
+        else:
+            pos_rewards = pos_sequence_reward
+
+        pos_advantages = pos_batch.batch["advantages"]
+        pos_returns = pos_batch.batch["returns"]
+
+        pos_max_response_length = pos_batch.batch["responses"].shape[-1]
+
+        pos_prompt_mask = pos_batch.batch["attention_mask"][:, :-pos_max_response_length].bool()
+        pos_response_mask = pos_batch.batch["attention_mask"][:, -pos_max_response_length:].bool()
+
+        pos_max_prompt_length = pos_prompt_mask.size(-1)
+
+        pos_response_info = _compute_response_info(pos_batch)
+        pos_prompt_length = pos_response_info["prompt_length"]
+        pos_response_length = pos_response_info["response_length"]
+
+        pos_valid_adv = torch.masked_select(pos_advantages, pos_response_mask)
+        pos_valid_returns = torch.masked_select(pos_returns, pos_response_mask)
+
+        pos_metrics = {
+            # score
+            "critic_pos/score/mean": torch.mean(pos_score).detach().item(),
+            "critic_pos/score/max": torch.max(pos_score).detach().item(),
+            "critic_pos/score/min": torch.min(pos_score).detach().item(),
+            # reward
+            "critic_pos/rewards/mean": torch.mean(pos_rewards).detach().item(),
+            "critic_pos/rewards/max": torch.max(pos_rewards).detach().item(),
+            "critic_pos/rewards/min": torch.min(pos_rewards).detach().item(),
+            # adv
+            "critic_pos/advantages/mean": torch.mean(pos_valid_adv).detach().item(),
+            "critic_pos/advantages/max": torch.max(pos_valid_adv).detach().item(),
+            "critic_pos/advantages/min": torch.min(pos_valid_adv).detach().item(),
+            # returns
+            "critic_pos/returns/mean": torch.mean(pos_valid_returns).detach().item(),
+            "critic_pos/returns/max": torch.max(pos_valid_returns).detach().item(),
+            "critic_pos/returns/min": torch.min(pos_valid_returns).detach().item(),
+
+            # response length
+            "response_length/pos/mean": torch.mean(pos_response_length).detach().item(),
+            "response_length/pos/max": torch.max(pos_response_length).detach().item(),
+            "response_length/pos/min": torch.min(pos_response_length).detach().item(),
+            "response_length/pos/clip_ratio": torch.mean(torch.eq(pos_response_length, pos_max_response_length).float()).detach().item(),
+            # prompt length
+            "prompt_length/pos/mean": torch.mean(pos_prompt_length).detach().item(),
+            "prompt_length/pos/max": torch.max(pos_prompt_length).detach().item(),
+            "prompt_length/pos/min": torch.min(pos_prompt_length).detach().item(),
+            "prompt_length/pos/clip_ratio": torch.mean(torch.eq(pos_prompt_length, pos_max_prompt_length).float()).detach().item(),
+        }
+        metrics.update(pos_metrics)
+
+    if accs is not None:
+        neg_idxs = accs <= 0
+    else:
+        neg_idxs = sequence_score <= 0
+    neg_batch = batch[neg_idxs]
+    if neg_batch.batch['responses'].shape[0] != 0:
+        neg_sequence_score = neg_batch.batch['token_level_scores'].sum(-1)
+        neg_sequence_reward = neg_batch.batch['token_level_rewards'].sum(-1)
+        neg_score = neg_sequence_score
+        if accs is not None:
+            neg_rewards = torch.where(accs[neg_idxs] > 0, 1, 0).to(sequence_reward.dtype)
+        else:
+            neg_rewards = neg_sequence_reward
+
+        neg_advantages = neg_batch.batch['advantages']
+        neg_returns = neg_batch.batch['returns']
+
+        neg_max_response_length = neg_batch.batch['responses'].shape[-1]
+
+        neg_prompt_mask = neg_batch.batch['attention_mask'][:, :-neg_max_response_length].bool()
+        neg_response_mask = neg_batch.batch['attention_mask'][:, -neg_max_response_length:].bool()
+
+        neg_max_prompt_length = neg_prompt_mask.size(-1)
+
+        neg_response_info = _compute_response_info(neg_batch)
+        neg_prompt_length = neg_response_info['prompt_length']
+        neg_response_length = neg_response_info['response_length']
+
+        neg_valid_adv = torch.masked_select(neg_advantages, neg_response_mask)
+        neg_valid_returns = torch.masked_select(neg_returns, neg_response_mask)
+
+        neg_metrics = {
+            # score
+            'critic_neg/score/mean': torch.mean(neg_score).detach().item(),
+            'critic_neg/score/max': torch.max(neg_score).detach().item(),
+            'critic_neg/score/min': torch.min(neg_score).detach().item(),
+            # reward
+            'critic_neg/rewards/mean': torch.mean(neg_rewards).detach().item(),
+            'critic_neg/rewards/max': torch.max(neg_rewards).detach().item(),
+            'critic_neg/rewards/min': torch.min(neg_rewards).detach().item(),
+            # adv
+            'critic_neg/advantages/mean': torch.mean(neg_valid_adv).detach().item(),
+            'critic_neg/advantages/max': torch.max(neg_valid_adv).detach().item(),
+            'critic_neg/advantages/min': torch.min(neg_valid_adv).detach().item(),
+            # returns
+            'critic_neg/returns/mean': torch.mean(neg_valid_returns).detach().item(),
+            'critic_neg/returns/max': torch.max(neg_valid_returns).detach().item(),
+            'critic_neg/returns/min': torch.min(neg_valid_returns).detach().item(),
+
+            # response length
+            'response_length/neg/mean': torch.mean(neg_response_length).detach().item(),
+            'response_length/neg/max': torch.max(neg_response_length).detach().item(),
+            'response_length/neg/min': torch.min(neg_response_length).detach().item(),
+            'response_length/neg/clip_ratio': torch.mean(torch.eq(neg_response_length, neg_max_response_length).float()).detach().item(),
+            # prompt length
+            'prompt_length/neg/mean': torch.mean(neg_prompt_length).detach().item(),
+            'prompt_length/neg/max': torch.max(neg_prompt_length).detach().item(),
+            'prompt_length/neg/min': torch.min(neg_prompt_length).detach().item(),
+            'prompt_length/neg/clip_ratio': torch.mean(torch.eq(neg_prompt_length, neg_max_prompt_length).float()).detach().item(),
+        }
+        metrics.update(neg_metrics)
+
     return metrics
 
 
@@ -373,30 +503,42 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
 
     # Calculate metrics for each group
     data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    data_std = {}
+    data_response_length = {}
     for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
+        all_accs = []
+        all_response_lengths = []
         for prompt, var2vals in prompt2var2vals.items():
             for var_name, var_vals in var2vals.items():
                 if isinstance(var_vals[0], str):
+                    continue
+                # if var_name != "acc":
+                #     continue
+                if var_name == "response_length":
+                    all_response_lengths.extend(var_vals)
                     continue
 
                 metric = {}
                 n_resps = len(var_vals)
                 metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                metric[f"pass@{n_resps}"] = np.max(var_vals)
+                if var_name == "acc":
+                    all_accs.append(var_vals)
 
                 if n_resps > 1:
                     metric[f"std@{n_resps}"] = np.std(var_vals)
 
                     ns = []
-                    n = 2
-                    while n < n_resps:
-                        ns.append(n)
-                        n *= 2
+                    # n = 2
+                    # while n < n_resps:
+                    #     ns.append(n)
+                    #     n *= 2
                     ns.append(n_resps)
 
                     for n in ns:
-                        [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed)
-                        metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
-                        metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
+                        # [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed)
+                        # metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
+                        # metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
                         if var2vals.get("pred", None) is not None:
                             vote_data = [{"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"])]
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
@@ -408,6 +550,10 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
                             metric[f"maj@{n}/mean"], metric[f"maj@{n}/std"] = maj_n_mean, maj_n_std
 
                 data_src2prompt2var2metric[data_source][prompt][var_name] = metric
+        all_accs = np.stack(all_accs)
+        all_accs_per_eval = np.mean(all_accs, axis=0)
+        data_std[data_source] = np.std(all_accs_per_eval)
+        data_response_length[data_source] = np.mean(all_response_lengths)
 
     # Aggregate metrics across prompts
     data_src2var2metric2prompt_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -421,6 +567,10 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
     for data_source, var2metric2prompt_vals in data_src2var2metric2prompt_vals.items():
         for var_name, metric2prompt_vals in var2metric2prompt_vals.items():
             for metric_name, prompt_vals in metric2prompt_vals.items():
-                data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
+                if var_name == "acc" and metric_name.startswith("std@"):
+                    data_src2var2metric2val[data_source][var_name][metric_name] = data_std[data_source]
+                else:
+                    data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
+        data_src2var2metric2val[data_source]["response_length"]["mean"] = data_response_length[data_source]
 
     return data_src2var2metric2val

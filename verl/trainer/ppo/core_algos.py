@@ -177,6 +177,8 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: str = True,
+    config=None,
+    batch=None,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -198,17 +200,24 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
-    scores = token_level_rewards.sum(dim=-1)
+    if batch is not None and "outcome_rewards" in batch.keys():
+        scores = batch["outcome_rewards"]
+        reward_max = torch.max(scores)
+    else:
+        scores = token_level_rewards.sum(dim=-1)
+        reward_max = torch.max(token_level_rewards, dim=-1).values
 
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
+    id2num = {}
 
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
             id2score[index[i]].append(scores[i])
         for idx in id2score:
+            id2num[idx] = len(id2score[idx])
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
                 id2std[idx] = torch.tensor(1.0)
@@ -222,7 +231,16 @@ def compute_grpo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
+        if config.get("use_batch_std", False):
+            assert not norm_adv_by_std_in_grpo, f"batch std and group std cannot be used at the same time"
+            batch_rewards = []
+            for v in id2score.values():
+                batch_rewards.extend(v)
+            batch_std = torch.tensor(batch_rewards).float().std()
+            scores = scores / (batch_std + epsilon)
         scores = scores.unsqueeze(-1) * response_mask
+        if config is not None and batch is not None:
+            pass
 
     return scores, scores
 
@@ -535,6 +553,7 @@ def compute_policy_loss(
     log_prob,
     advantages,
     response_mask,
+    high_entropy_mask,
     cliprange=None,
     cliprange_low=None,
     cliprange_high=None,
@@ -556,6 +575,8 @@ def compute_policy_loss(
             Advantage estimates for each action, shape (batch_size, response_length).
         response_mask (torch.Tensor):
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        high_entropy_mask (torch.Tensor):
+            Mask indicating high-entropy (Top 20%) tokens, shape (batch_size, response_length).
         cliprange (float, optional):
             Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
             Defaults to None (must be provided).
@@ -569,6 +590,7 @@ def compute_policy_loss(
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
     """
+    metrics = {}
     assert clip_ratio_c > 1.0, "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
 
     negative_approx_kl = log_prob - old_log_prob
@@ -591,7 +613,11 @@ def compute_policy_loss(
     pg_clipfrac_lower = verl_F.masked_mean(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    if high_entropy_mask is not None:
+        # Apply high-entropy mask to the losses
+        pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=high_entropy_mask, loss_agg_mode=loss_agg_mode)
+    else:
+        pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 

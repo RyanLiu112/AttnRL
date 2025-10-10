@@ -108,7 +108,7 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     )
 
 
-def compute_reward(data: DataProto, reward_fn):
+def compute_reward(data: DataProto, reward_fn, return_all=False):
     """
     Compute reward for a batch of data.
     Args:
@@ -121,19 +121,23 @@ def compute_reward(data: DataProto, reward_fn):
         reward_result = reward_fn(data, return_dict=True)
         reward_tensor = reward_result["reward_tensor"]
         reward_extra_infos_dict = reward_result["reward_extra_info"]
+        if return_all:
+            return reward_result
     except Exception as e:
         print(f"Error in reward_fn: {e}")
         reward_tensor = reward_fn(data)
         reward_extra_infos_dict = {}
+        if return_all:
+            return {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_infos_dict}
 
     return reward_tensor, reward_extra_infos_dict
 
 
 @ray.remote(num_cpus=1)
-def compute_reward_async(data: DataProto, config, tokenizer):
+def compute_reward_async(data: DataProto, config, tokenizer, return_all=False):
     """
     Load the reward manager and compute the reward for a batch of data.
     This is meant to be run in a separate Ray worker.
     """
     reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-    return compute_reward(data, reward_fn)
+    return compute_reward(data, reward_fn, return_all=return_all)
