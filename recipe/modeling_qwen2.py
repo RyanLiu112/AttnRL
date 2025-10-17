@@ -1204,7 +1204,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             process_attn_type = kwargs.get("process_attn_type", "")
             if process_attn_type == "directly_return":
                 pass
-            elif "use_receiver_head" not in process_attn_type:
+            else:
                 attn_scores = []
                 for seq_idx in range(len(outputs.attentions[0])):
                     seq_head_scores = aggregate_attentions(outputs.attentions, seq_idx)
@@ -1216,102 +1216,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 padded_scores = [tuple(sub_list) + (-1.0,) * (target_length - len(sub_list)) for sub_list in attn_scores]
                 attn_scores = torch.tensor(padded_scores)
                 outputs.hidden_states = {
-                    "attn_scores": attn_scores,
-                }
-            else:
-                assert not output_hidden_states  # because we'll use outputs.hidden_states to output receiver head
-                from scipy import stats
-                from scipy.signal import find_peaks
-                import numpy as np
-
-                def select_receiver_heads(all_head_scores, top_k=32):
-                    # all_head_scores: [layers, heads, sentences]
-                    # 先对每 head 跨句子计算峰度
-                    kurt = stats.kurtosis(all_head_scores, axis=2, nan_policy='omit')  # [layers, heads]
-                    kurt = torch.from_numpy(kurt)  # [L, H]
-                    flat = kurt.view(-1)  # [L * H]
-                    top_vals, top_idxs = torch.topk(flat, top_k, largest=True)
-                    layers = top_idxs // kurt.shape[-1]  # 整除得到 layer 索引
-                    heads = top_idxs % kurt.shape[-1]  # 取余得到 head 索引
-                    return torch.stack([layers, heads], dim=1)  # [top_k, 2]
-
-                seq_idxs = []
-                seq_cnts = []
-                seq_receivers = []
-                attn_scores = []
-                for seq_idx in range(len(outputs.attentions[0])):
-                    seq_head_scores = aggregate_attentions(outputs.attentions, seq_idx)
-                    seq_head_scores = torch.stack(seq_head_scores).to(torch.float32).cpu().numpy().reshape(len(outputs.attentions), len(outputs.attentions[0][0][0]), -1)
-
-                    # 5. 对每个 receiver head 找关键句子（最高 vertical score）
-                    key_sentences = []
-                    receiver_scores = []
-                    receivers = select_receiver_heads(seq_head_scores[:, :, 1:])
-                    for (l, h) in receivers.tolist():
-                        scores = seq_head_scores[l, h, 1:]
-                        # idx = int(np.nanargmax(scores))
-                        # idxs = np.argpartition(scores, -2)[-2:][::-1]
-                        vals, idxs = torch.topk(torch.from_numpy(scores), 2, largest=True)
-                        key_sentences.append(idxs.numpy())
-                        receiver_scores.append(scores)
-                    key_sentences = np.stack(key_sentences)
-                    key_idxs_old, key_cnts_old = np.unique(key_sentences, return_counts=True)
-                    order = np.argsort(-key_cnts_old)
-                    key_idxs_old = key_idxs_old[order]
-                    key_cnts_old = key_cnts_old[order]
-
-                    receiver_scores = np.stack(receiver_scores)
-                    seq = receiver_scores.max(axis=0)
-                    peaks, props = find_peaks(seq, prominence=(None, None))
-                    order = np.argsort(-props["prominences"])
-                    key_idxs = peaks[order]
-                    key_cnts = props["prominences"][order]
-                    max_length = 10
-                    if len(key_idxs) == 0:
-                        key_idxs = key_idxs_old[:max_length]
-                        key_cnts = key_cnts_old[:max_length]
-                    elif len(key_idxs) == 1:
-                        if key_idxs_old[0] != key_idxs[0]:
-                            pad_idx = key_idxs_old[0]
-                        elif key_idxs_old[1] != key_idxs[0]:
-                            pad_idx = key_idxs_old[1]
-                        else:
-                            pad_idx = key_idxs_old[0]
-                        key_idxs = np.pad(key_idxs, (0, 1), mode="constant", constant_values=pad_idx)
-                        key_cnts = np.pad(key_cnts, (0, 1), mode="constant", constant_values=key_cnts[0])
-                    elif len(key_idxs) > max_length:
-                        key_idxs = key_idxs[:max_length]
-                        key_cnts = key_cnts[:max_length]
-                    if len(key_idxs) < max_length:
-                        key_idxs = np.pad(key_idxs, (0, max_length - len(key_idxs)), mode="constant", constant_values=-1)
-                        key_cnts = np.pad(key_cnts, (0, max_length - len(key_cnts)), mode="constant", constant_values=-1)
-                    key_idxs = torch.tensor(key_idxs)
-                    key_cnts = torch.tensor(key_cnts)
-
-                    # key_idxs, key_cnts = np.unique(key_sentences, return_counts=True)
-                    # # 按照 key_cnts 降序排序 key_idxs
-                    # sorted_indices = np.argsort(-key_cnts)  # 注意负号表示降序
-                    # if len(key_idxs) >= 2:
-                    #     key_idxs = torch.tensor(key_idxs[sorted_indices][:2])
-                    #     key_cnts = torch.tensor(key_cnts[sorted_indices][:2])
-                    # else:
-                    #     key_idxs = torch.tensor([key_idxs[0], key_idxs[0]])
-                    #     key_cnts = torch.tensor([key_cnts[0], key_cnts[0]])
-                    seq_idxs.append(key_idxs)
-                    seq_cnts.append(key_cnts)
-                    seq_receivers.append(receivers)
-                    attn_scores.append(seq)
-
-                seq_idxs = torch.stack(seq_idxs)
-                seq_cnts = torch.stack(seq_cnts)
-                seq_receivers = torch.stack(seq_receivers)
-                target_length = 8194
-                padded_scores = [tuple(sub_list) + (-1.0,) * (target_length - len(sub_list)) for sub_list in attn_scores]
-                attn_scores = torch.tensor(padded_scores)
-                outputs.hidden_states = {
-                    "seq_idxs": seq_idxs,
-                    "seq_cnts": seq_cnts,
-                    "receivers": seq_receivers,
                     "attn_scores": attn_scores,
                 }
 

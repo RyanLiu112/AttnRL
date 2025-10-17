@@ -670,12 +670,6 @@ class RayAttnRLTrainer(RayPPOTrainer):
                                         kwargs["token_ranges"] = old_batch.batch["token_ranges"].tolist()
                                     if "step_nums" in old_batch.batch:
                                         kwargs["step_nums"] = old_batch.batch["step_nums"].tolist()
-                                    if "seq_idxs" in old_batch.batch:
-                                        kwargs["seq_idxs"] = old_batch.batch["seq_idxs"].tolist()
-                                    if "seq_cnts" in old_batch.batch:
-                                        kwargs["seq_cnts"] = old_batch.batch["seq_cnts"].tolist()
-                                    if "receivers" in old_batch.batch:
-                                        kwargs["receivers"] = old_batch.batch["receivers"].tolist()
                                     if "token_idxs" in old_batch.batch:
                                         kwargs["token_idxs"] = old_batch.batch["token_idxs"].tolist()
                                     if "attn_scores" in old_batch.batch:
@@ -704,12 +698,6 @@ class RayAttnRLTrainer(RayPPOTrainer):
                                         kwargs["token_ranges"] = batch.batch["token_ranges"].tolist()
                                     if "step_nums" in batch.batch:
                                         kwargs["step_nums"] = batch.batch["step_nums"].tolist()
-                                    if "seq_idxs" in batch.batch:
-                                        kwargs["seq_idxs"] = batch.batch["seq_idxs"].tolist()
-                                    if "seq_cnts" in batch.batch:
-                                        kwargs["seq_cnts"] = batch.batch["seq_cnts"].tolist()
-                                    if "receivers" in batch.batch:
-                                        kwargs["receivers"] = batch.batch["receivers"].tolist()
                                     if "stop_think_step_idxs" in batch.batch:
                                         kwargs["stop_think_step_idxs"] = batch.batch["stop_think_step_idxs"].tolist()
                                     if "stop_think_token_idxs" in batch.batch:
