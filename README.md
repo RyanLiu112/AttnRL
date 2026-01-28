@@ -10,6 +10,7 @@
 
 ## 🔔 News
 
+- **[2026-01-26]** 🎉 Our work is accepted by [ICLR 2026](https://openreview.net/forum?id=NCN8oUsiNf)!
 - **[2025-10-21]** 📢 Our work is reported by [Synced (机器之心)](https://mp.weixin.qq.com/s/laPqnICWG-PIVIDQOTnbNQ)!
 - **[2025-10-10]** ✨ Code is now available.
 - **[2025-09-30]** 📄 Our paper is released on [arXiv](https://arxiv.org/abs/2509.26628).
@@ -59,11 +60,12 @@ Evaluation scripts are the same as the training scripts. `+trainer.val_only=True
 If you find this work helpful, please kindly cite our paper:
 
 ```bibtex
-@article{AttnRL,
-    title   = {Attention as a Compass: Efficient Exploration for Process-Supervised RL in Reasoning Models},
-    author  = {Liu, Runze and Wang, Jiakang and Shi, Yuling and Xie, Zhihui and An, Chenxin and Zhang, Kaiyan and Zhao, Jian and Gu, Xiaodong and Lin, Lei and Hu, Wenping and Li, Xiu and Zhang, Fuzheng and Zhou, Guorui and Gai, Kun},
-    journal = {arXiv preprint arXiv:2509.26628},
-    year    = {2025}
+@inproceedings{AttnRL,
+    title     = {Attention as a Compass: Efficient Exploration for Process-Supervised {RL} in Reasoning Models},
+    author    = {Runze Liu and Jiakang Wang and Yuling Shi and Zhihui Xie and Chenxin An and Kaiyan Zhang and Jian Zhao and Xiaodong Gu and Lei Lin and Wenping Hu and Xiu Li and Fuzheng Zhang and Guorui Zhou and Kun Gai},
+    booktitle = {The Fourteenth International Conference on Learning Representations},
+    year      = {2026},
+    url       = {https://openreview.net/forum?id=NCN8oUsiNf}
 }
 ```
 
